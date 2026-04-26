@@ -13,6 +13,13 @@
 #define HAVE_X86_SIMD 0
 #endif
 
+#if HAVE_X86_SIMD && defined(__FMA__)
+#define HAVE_FMA 1
+#else
+#define HAVE_FMA 0
+#endif
+#define PREFETCH_DIST 8
+
 typedef struct {
     int nrows;
     int ncols;
@@ -101,6 +108,21 @@ static void csr_spmv(const CSRMatrix *A, const double *x, double *y) {
         for (int p = A->row_ptr[i]; p < A->row_ptr[i + 1]; p++) {
             sum += A->values[p] * x[A->col_idx[p]];
         }
+        y[i] = sum;
+    }
+}
+
+static void csr_spmv_prefetch(const CSRMatrix *A, const double *x, double *y) {
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < A->nrows; i++) {
+        if (i + PREFETCH_DIST < A->nrows) {
+            int pnext = A->row_ptr[i + PREFETCH_DIST];
+            __builtin_prefetch(&A->values[pnext], 0, 1);
+            __builtin_prefetch(&A->col_idx[pnext], 0, 1);
+        }
+        double sum = 0.0;
+        for (int p = A->row_ptr[i]; p < A->row_ptr[i + 1]; p++)
+            sum += A->values[p] * x[A->col_idx[p]];
         y[i] = sum;
     }
 }
@@ -293,6 +315,77 @@ static void bcsr_spmv(const BCSRMatrix *B, const double *x, double *y, int use_a
                 }
             }
         }
+        for (int rr = 0; rr < row_count; rr++) y[r0 + rr] = acc[rr];
+    }
+}
+
+static void bcsr_spmv_fma(const BCSRMatrix *B, const double *x, double *y) {
+    #pragma omp parallel for schedule(static)
+    for (int rb = 0; rb < B->n_block_rows; rb++) {
+        int r0 = rb * B->br;
+        int row_count = (r0 + B->br <= B->nrows) ? B->br : (B->nrows - r0);
+        double acc[4] = {0.0, 0.0, 0.0, 0.0};
+#if HAVE_FMA
+        __m256d vacc[4] = {_mm256_setzero_pd(), _mm256_setzero_pd(),
+                           _mm256_setzero_pd(), _mm256_setzero_pd()};
+        for (int p = B->row_ptr[rb]; p < B->row_ptr[rb + 1]; p++) {
+            int c0 = B->col_idx[p] * B->bc;
+            const double *blk = &B->values[(size_t)p * (size_t)B->br * (size_t)B->bc];
+            __m256d xv = _mm256_set_pd(
+                (c0 + 3 < B->ncols) ? x[c0 + 3] : 0.0,
+                (c0 + 2 < B->ncols) ? x[c0 + 2] : 0.0,
+                (c0 + 1 < B->ncols) ? x[c0 + 1] : 0.0,
+                (c0 < B->ncols) ? x[c0] : 0.0
+            );
+            for (int rr = 0; rr < row_count; rr++) {
+                __m256d av = _mm256_loadu_pd(&blk[(size_t)rr * (size_t)B->bc]);
+                vacc[rr] = _mm256_fmadd_pd(av, xv, vacc[rr]);
+            }
+        }
+        for (int rr = 0; rr < row_count; rr++) {
+            double tmp[4];
+            _mm256_storeu_pd(tmp, vacc[rr]);
+            acc[rr] = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+        }
+#elif HAVE_X86_SIMD
+        for (int p = B->row_ptr[rb]; p < B->row_ptr[rb + 1]; p++) {
+            int c0 = B->col_idx[p] * B->bc;
+            const double *blk = &B->values[(size_t)p * (size_t)B->br * (size_t)B->bc];
+            if (B->bc == 4) {
+                __m256d xv = _mm256_set_pd(
+                    (c0 + 3 < B->ncols) ? x[c0 + 3] : 0.0,
+                    (c0 + 2 < B->ncols) ? x[c0 + 2] : 0.0,
+                    (c0 + 1 < B->ncols) ? x[c0 + 1] : 0.0,
+                    (c0 < B->ncols) ? x[c0] : 0.0
+                );
+                for (int rr = 0; rr < row_count; rr++) {
+                    __m256d av = _mm256_loadu_pd(&blk[(size_t)rr * (size_t)B->bc]);
+                    __m256d pv = _mm256_mul_pd(av, xv);
+                    double tmp[4];
+                    _mm256_storeu_pd(tmp, pv);
+                    acc[rr] += tmp[0] + tmp[1] + tmp[2] + tmp[3];
+                }
+            } else {
+                for (int rr = 0; rr < row_count; rr++) {
+                    for (int cc = 0; cc < B->bc; cc++) {
+                        int c = c0 + cc;
+                        if (c < B->ncols) acc[rr] += blk[(size_t)rr * (size_t)B->bc + (size_t)cc] * x[c];
+                    }
+                }
+            }
+        }
+#else
+        for (int p = B->row_ptr[rb]; p < B->row_ptr[rb + 1]; p++) {
+            int c0 = B->col_idx[p] * B->bc;
+            const double *blk = &B->values[(size_t)p * (size_t)B->br * (size_t)B->bc];
+            for (int rr = 0; rr < row_count; rr++) {
+                for (int cc = 0; cc < B->bc; cc++) {
+                    int c = c0 + cc;
+                    if (c < B->ncols) acc[rr] += blk[(size_t)rr * (size_t)B->bc + (size_t)cc] * x[c];
+                }
+            }
+        }
+#endif
         for (int rr = 0; rr < row_count; rr++) y[r0 + rr] = acc[rr];
     }
 }
@@ -550,7 +643,10 @@ static void run_for_matrix(FILE *fout, const CSRMatrix *A, const Config *cfg, do
     double *y_ref = (double *)malloc((size_t)A->nrows * sizeof(double));
     double *y_tmp = (double *)malloc((size_t)A->nrows * sizeof(double));
 
-    for (int i = 0; i < A->ncols; i++) x[i] = rand_unit();
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < A->ncols; i++) x[i] = 0.1 + 0.9 * ((double)(i % 97) / 97.0);
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < A->nrows; i++) { y[i] = 0.0; y_tmp[i] = 0.0; }
     dense_reference(A, x, y_ref);
 
     csr_spmv(A, x, y_tmp);
@@ -580,6 +676,18 @@ static void run_for_matrix(FILE *fout, const CSRMatrix *A, const Config *cfg, do
         exit(2);
     }
 
+    csr_spmv_prefetch(A, x, y_tmp);
+    if (max_abs_diff(y_ref, y_tmp, A->nrows) > 1e-8) {
+        fprintf(stderr, "CSR_PREFETCH correctness failed for %s\n", A->name);
+        exit(2);
+    }
+
+    bcsr_spmv_fma(&B4, x, y_tmp);
+    if (max_abs_diff(y_ref, y_tmp, A->nrows) > 1e-6) {
+        fprintf(stderr, "BCSR4x4_FMA correctness failed for %s\n", A->name);
+        exit(2);
+    }
+
     for (int th = cfg->min_threads; th <= cfg->max_threads; th++) {
         omp_set_num_threads(th);
         double runs[128];
@@ -596,6 +704,19 @@ static void run_for_matrix(FILE *fout, const CSRMatrix *A, const Config *cfg, do
         double gflops = flops / t / 1e9;
         double bw = csr_bytes_per_spmv(A) / t / 1e9;
         fprintf(fout, "%s,%s,%d,%d,%d,CSR,%d,%.9f,%.6f,%.6f,%.6f,%.6f\n",
+            A->name, A->family, A->nrows, A->ncols, A->nnz, th, t, gflops, bw, flops / csr_bytes_per_spmv(A), stream_bw);
+
+        for (int w = 0; w < cfg->warmup_runs; w++) csr_spmv_prefetch(A, x, y);
+        for (int r = 0; r < cfg->timed_runs; r++) {
+            double t0 = now_sec();
+            csr_spmv_prefetch(A, x, y);
+            double t1 = now_sec();
+            runs[r] = t1 - t0;
+        }
+        t = median(runs, cfg->timed_runs);
+        gflops = flops / t / 1e9;
+        bw = csr_bytes_per_spmv(A) / t / 1e9;
+        fprintf(fout, "%s,%s,%d,%d,%d,CSR_PREFETCH,%d,%.9f,%.6f,%.6f,%.6f,%.6f\n",
             A->name, A->family, A->nrows, A->ncols, A->nnz, th, t, gflops, bw, flops / csr_bytes_per_spmv(A), stream_bw);
 
         for (int w = 0; w < cfg->warmup_runs; w++) ell_spmv(&E, x, y, cfg->use_avx2);
@@ -635,6 +756,19 @@ static void run_for_matrix(FILE *fout, const CSRMatrix *A, const Config *cfg, do
         gflops = flops / t / 1e9;
         bw = bcsr_bytes_per_spmv(&B4) / t / 1e9;
         fprintf(fout, "%s,%s,%d,%d,%d,BCSR4x4,%d,%.9f,%.6f,%.6f,%.6f,%.6f\n",
+            A->name, A->family, A->nrows, A->ncols, A->nnz, th, t, gflops, bw, flops / bcsr_bytes_per_spmv(&B4), stream_bw);
+
+        for (int w = 0; w < cfg->warmup_runs; w++) bcsr_spmv_fma(&B4, x, y);
+        for (int r = 0; r < cfg->timed_runs; r++) {
+            double t0 = now_sec();
+            bcsr_spmv_fma(&B4, x, y);
+            double t1 = now_sec();
+            runs[r] = t1 - t0;
+        }
+        t = median(runs, cfg->timed_runs);
+        gflops = flops / t / 1e9;
+        bw = bcsr_bytes_per_spmv(&B4) / t / 1e9;
+        fprintf(fout, "%s,%s,%d,%d,%d,BCSR4x4_FMA,%d,%.9f,%.6f,%.6f,%.6f,%.6f\n",
             A->name, A->family, A->nrows, A->ncols, A->nnz, th, t, gflops, bw, flops / bcsr_bytes_per_spmv(&B4), stream_bw);
     }
 

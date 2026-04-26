@@ -1,15 +1,15 @@
 # SpMV Results Narrative
 
 - Dataset count: 12
-- Thread sweep: 1..14
+- Thread sweep: 1..1
 - Timing protocol: 5 warm-up + 20 timed runs (median per point)
 
 ## Per-family behavior at max thread count
 
-- banded_pde: CSR=2.923 GFLOP/s, ELLPACK=2.953 GFLOP/s, BCSR2x2=2.484 GFLOP/s, BCSR4x4=2.547 GFLOP/s (best: ELLPACK)
-- block_structured: CSR=1.817 GFLOP/s, ELLPACK=1.775 GFLOP/s, BCSR2x2=1.722 GFLOP/s, BCSR4x4=1.719 GFLOP/s (best: CSR)
-- fem_mesh: CSR=1.931 GFLOP/s, ELLPACK=2.021 GFLOP/s, BCSR2x2=1.662 GFLOP/s, BCSR4x4=1.556 GFLOP/s (best: ELLPACK)
-- irregular_graph: CSR=1.898 GFLOP/s, ELLPACK=1.641 GFLOP/s, BCSR2x2=1.158 GFLOP/s, BCSR4x4=0.699 GFLOP/s (best: CSR)
+- banded_pde: CSR=6.753 GFLOP/s, CSR_PREFETCH=6.169 GFLOP/s, ELLPACK=5.516 GFLOP/s, BCSR2x2=1.778 GFLOP/s, BCSR4x4=1.951 GFLOP/s, BCSR4x4_FMA=1.828 GFLOP/s (best: CSR)
+- block_structured: CSR=5.965 GFLOP/s, CSR_PREFETCH=5.772 GFLOP/s, ELLPACK=3.810 GFLOP/s, BCSR2x2=2.243 GFLOP/s, BCSR4x4=3.133 GFLOP/s, BCSR4x4_FMA=2.937 GFLOP/s (best: CSR)
+- fem_mesh: CSR=5.458 GFLOP/s, CSR_PREFETCH=5.923 GFLOP/s, ELLPACK=5.352 GFLOP/s, BCSR2x2=1.372 GFLOP/s, BCSR4x4=0.908 GFLOP/s, BCSR4x4_FMA=0.944 GFLOP/s (best: CSR_PREFETCH)
+- irregular_graph: CSR=4.009 GFLOP/s, CSR_PREFETCH=3.923 GFLOP/s, ELLPACK=1.247 GFLOP/s, BCSR2x2=0.367 GFLOP/s, BCSR4x4=0.147 GFLOP/s, BCSR4x4_FMA=0.156 GFLOP/s (best: CSR)
 
 ## Limitations
 
