@@ -36,8 +36,18 @@ def make_roofline(rows, out_path):
             grouped[r["format"]].append(r)
 
     plt.figure(figsize=(9, 6))
-    colors = {"CSR": "tab:blue", "ELLPACK": "tab:orange", "BCSR2x2": "tab:green", "BCSR4x4": "tab:red"}
-    markers = {"CSR": "o", "ELLPACK": "s", "BCSR2x2": "^", "BCSR4x4": "D"}
+    colors = {
+        "CSR": "tab:blue", "CSR_PREFETCH": "tab:cyan",
+        "ELLPACK": "tab:orange",
+        "BCSR2x2": "tab:green",
+        "BCSR4x4": "tab:red", "BCSR4x4_FMA": "tab:purple",
+    }
+    markers = {
+        "CSR": "o", "CSR_PREFETCH": "v",
+        "ELLPACK": "s",
+        "BCSR2x2": "^",
+        "BCSR4x4": "D", "BCSR4x4_FMA": "P",
+    }
 
     for fmt, pts in grouped.items():
         x = [max(1e-4, p["arith_intensity"]) for p in pts]
@@ -108,7 +118,7 @@ def write_summary(rows, out_path):
             by_family_format[(r["family"], r["format"])].append(r["gflops"])
 
     families = sorted({r["family"] for r in rows})
-    formats = ["CSR", "ELLPACK", "BCSR2x2", "BCSR4x4"]
+    formats = ["CSR", "CSR_PREFETCH", "ELLPACK", "BCSR2x2", "BCSR4x4", "BCSR4x4_FMA"]
 
     with open(out_path, "w") as f:
         f.write("# SpMV Results Narrative\n\n")
