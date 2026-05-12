@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=spmv_bench_v2
-#SBATCH --account=m4776          # update to your account if different
+#SBATCH --account=m4341
 #SBATCH --constraint=cpu
 #SBATCH --qos=regular
 #SBATCH --nodes=1
