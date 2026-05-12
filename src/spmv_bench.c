@@ -19,6 +19,7 @@
 #define HAVE_FMA 0
 #endif
 #define PREFETCH_DIST 8
+#define SELL_C 32
 
 typedef struct {
     int nrows;
@@ -50,6 +51,29 @@ typedef struct {
     int *col_idx;
     double *values;
 } BCSRMatrix;
+
+/* Sliced ELLPACK with row sorting (SELL-C-sigma).
+ * Rows partitioned into slices of C rows each; within each slice rows
+ * are sorted by NNZ descending (sigma permutation) to minimise padding.
+ * Data stored column-major within each slice: element at local row i,
+ * column position k lives at col_idx[slice_ptr[s] + k*C + i]. */
+typedef struct {
+    int nrows, ncols, nnz, C, n_slices;
+    size_t total_nnz_padded;
+    int    *perm;       /* perm[s*C+i] = original row index              */
+    int    *slice_len;  /* max NNZ in slice s (length n_slices)          */
+    size_t *slice_ptr;  /* byte offset into arrays for slice s (len+1)   */
+    int    *col_idx;    /* column indices, column-major within each slice */
+    double *values;     /* values, column-major within each slice         */
+} SELLMatrix;
+
+/* CSR with fp32 values; x/y remain fp64 for accuracy comparison. */
+typedef struct {
+    int    nrows, ncols, nnz;
+    int   *row_ptr;
+    int   *col_idx;
+    float *values;
+} FP32CSRMatrix;
 
 typedef struct {
     int warmup_runs;
@@ -99,6 +123,20 @@ static void free_bcsr(BCSRMatrix *B) {
     free(B->row_ptr);
     free(B->col_idx);
     free(B->values);
+}
+
+static void free_sell(SELLMatrix *S) {
+    free(S->perm);
+    free(S->slice_len);
+    free(S->slice_ptr);
+    free(S->col_idx);
+    free(S->values);
+}
+
+static void free_fp32csr(FP32CSRMatrix *F) {
+    free(F->row_ptr);
+    free(F->col_idx);
+    free(F->values);
 }
 
 static void csr_spmv(const CSRMatrix *A, const double *x, double *y) {
@@ -390,6 +428,111 @@ static void bcsr_spmv_fma(const BCSRMatrix *B, const double *x, double *y) {
     }
 }
 
+static SELLMatrix csr_to_sell(const CSRMatrix *A, int C) {
+    SELLMatrix S;
+    S.nrows    = A->nrows;
+    S.ncols    = A->ncols;
+    S.nnz      = A->nnz;
+    S.C        = C;
+    S.n_slices = (A->nrows + C - 1) / C;
+
+    S.perm      = (int    *)malloc((size_t)A->nrows         * sizeof(int));
+    S.slice_len = (int    *)malloc((size_t)S.n_slices       * sizeof(int));
+    S.slice_ptr = (size_t *)malloc((size_t)(S.n_slices + 1) * sizeof(size_t));
+    int *tmp = (int *)malloc((size_t)C * sizeof(int));
+
+    size_t total = 0;
+    for (int s = 0; s < S.n_slices; s++) {
+        int r0  = s * C;
+        int cnt = (r0 + C <= A->nrows) ? C : (A->nrows - r0);
+
+        for (int i = 0; i < cnt; i++) tmp[i] = r0 + i;
+        /* insertion sort descending by NNZ (sigma permutation) */
+        for (int i = 1; i < cnt; i++) {
+            int key     = tmp[i];
+            int key_nnz = A->row_ptr[key + 1] - A->row_ptr[key];
+            int j = i - 1;
+            while (j >= 0 && (A->row_ptr[tmp[j]+1] - A->row_ptr[tmp[j]]) < key_nnz) {
+                tmp[j + 1] = tmp[j];
+                j--;
+            }
+            tmp[j + 1] = key;
+        }
+        for (int i = 0; i < cnt; i++) S.perm[r0 + i] = tmp[i];
+
+        /* max NNZ in slice = NNZ of first (largest) row after sort */
+        int max_nnz = (cnt > 0) ? (A->row_ptr[tmp[0]+1] - A->row_ptr[tmp[0]]) : 0;
+        S.slice_len[s] = max_nnz;
+        S.slice_ptr[s] = total;
+        total += (size_t)C * max_nnz; /* pad to full C rows, even last partial slice */
+    }
+    S.slice_ptr[S.n_slices] = total;
+    S.total_nnz_padded = total;
+
+    S.col_idx = (int    *)malloc(total * sizeof(int));
+    S.values  = (double *)malloc(total * sizeof(double));
+    for (size_t i = 0; i < total; i++) { S.col_idx[i] = -1; S.values[i] = 0.0; }
+
+    for (int s = 0; s < S.n_slices; s++) {
+        int r0  = s * C;
+        int cnt = (r0 + C <= A->nrows) ? C : (A->nrows - r0);
+        for (int i = 0; i < cnt; i++) {
+            int r  = S.perm[r0 + i];
+            int rs = A->row_ptr[r], re = A->row_ptr[r + 1];
+            for (int k = 0; k < re - rs; k++) {
+                size_t idx     = S.slice_ptr[s] + (size_t)k * C + i;
+                S.col_idx[idx] = A->col_idx[rs + k];
+                S.values[idx]  = A->values[rs + k];
+            }
+        }
+    }
+    free(tmp);
+    return S;
+}
+
+static void sell_spmv(const SELLMatrix *S, const double *x, double *y) {
+    #pragma omp parallel for schedule(static)
+    for (int s = 0; s < S->n_slices; s++) {
+        int r0  = s * S->C;
+        int cnt = (r0 + S->C <= S->nrows) ? S->C : (S->nrows - r0);
+        double acc[SELL_C];
+        for (int i = 0; i < cnt; i++) acc[i] = 0.0;
+
+        for (int k = 0; k < S->slice_len[s]; k++) {
+            size_t base = S->slice_ptr[s] + (size_t)k * S->C;
+            for (int i = 0; i < cnt; i++) {
+                int c = S->col_idx[base + i];
+                if (c >= 0) acc[i] += S->values[base + i] * x[c];
+            }
+        }
+        for (int i = 0; i < cnt; i++) y[S->perm[r0 + i]] = acc[i];
+    }
+}
+
+static FP32CSRMatrix csr_to_fp32csr(const CSRMatrix *A) {
+    FP32CSRMatrix F;
+    F.nrows  = A->nrows;
+    F.ncols  = A->ncols;
+    F.nnz    = A->nnz;
+    F.row_ptr = (int   *)malloc((size_t)(A->nrows + 1) * sizeof(int));
+    F.col_idx = (int   *)malloc((size_t)A->nnz         * sizeof(int));
+    F.values  = (float *)malloc((size_t)A->nnz         * sizeof(float));
+    memcpy(F.row_ptr, A->row_ptr, (size_t)(A->nrows + 1) * sizeof(int));
+    memcpy(F.col_idx, A->col_idx, (size_t)A->nnz         * sizeof(int));
+    for (int i = 0; i < A->nnz; i++) F.values[i] = (float)A->values[i];
+    return F;
+}
+
+static void fp32_csr_spmv(const FP32CSRMatrix *A, const double *x, double *y) {
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < A->nrows; i++) {
+        double sum = 0.0;
+        for (int p = A->row_ptr[i]; p < A->row_ptr[i + 1]; p++)
+            sum += (double)A->values[p] * x[A->col_idx[p]];
+        y[i] = sum;
+    }
+}
+
 static void dense_reference(const CSRMatrix *A, const double *x, double *y) {
     for (int i = 0; i < A->nrows; i++) y[i] = 0.0;
     for (int r = 0; r < A->nrows; r++) {
@@ -637,6 +780,21 @@ static double bcsr_bytes_per_spmv(const BCSRMatrix *B) {
            (double)B->nrows * sizeof(double);
 }
 
+/* SELL-C-sigma: padded values + padded col_idx + x reads (approx nnz) + y writes */
+static double sell_bytes_per_spmv(const SELLMatrix *S) {
+    return (double)S->total_nnz_padded * (sizeof(double) + sizeof(int))
+         + (double)S->nnz  * sizeof(double)
+         + (double)S->nrows * sizeof(double);
+}
+
+/* FP32-CSR: float values halve the value-array traffic */
+static double fp32csr_bytes_per_spmv(const CSRMatrix *A) {
+    return (double)A->nnz  * sizeof(float)
+         + (double)A->nnz  * sizeof(int)
+         + (double)A->nnz  * sizeof(double)
+         + (double)A->nrows * sizeof(double);
+}
+
 static void run_for_matrix(FILE *fout, const CSRMatrix *A, const Config *cfg, double stream_bw) {
     double *x = (double *)malloc((size_t)A->ncols * sizeof(double));
     double *y = (double *)malloc((size_t)A->nrows * sizeof(double));
@@ -685,6 +843,20 @@ static void run_for_matrix(FILE *fout, const CSRMatrix *A, const Config *cfg, do
     bcsr_spmv_fma(&B4, x, y_tmp);
     if (max_abs_diff(y_ref, y_tmp, A->nrows) > 1e-6) {
         fprintf(stderr, "BCSR4x4_FMA correctness failed for %s\n", A->name);
+        exit(2);
+    }
+
+    SELLMatrix S = csr_to_sell(A, SELL_C);
+    sell_spmv(&S, x, y_tmp);
+    if (max_abs_diff(y_ref, y_tmp, A->nrows) > 1e-7) {
+        fprintf(stderr, "SELL correctness failed for %s\n", A->name);
+        exit(2);
+    }
+
+    FP32CSRMatrix F = csr_to_fp32csr(A);
+    fp32_csr_spmv(&F, x, y_tmp);
+    if (max_abs_diff(y_ref, y_tmp, A->nrows) > 1e-5) {
+        fprintf(stderr, "FP32_CSR correctness failed for %s\n", A->name);
         exit(2);
     }
 
@@ -770,8 +942,36 @@ static void run_for_matrix(FILE *fout, const CSRMatrix *A, const Config *cfg, do
         bw = bcsr_bytes_per_spmv(&B4) / t / 1e9;
         fprintf(fout, "%s,%s,%d,%d,%d,BCSR4x4_FMA,%d,%.9f,%.6f,%.6f,%.6f,%.6f\n",
             A->name, A->family, A->nrows, A->ncols, A->nnz, th, t, gflops, bw, flops / bcsr_bytes_per_spmv(&B4), stream_bw);
+
+        for (int w = 0; w < cfg->warmup_runs; w++) sell_spmv(&S, x, y);
+        for (int r = 0; r < cfg->timed_runs; r++) {
+            double t0 = now_sec();
+            sell_spmv(&S, x, y);
+            double t1 = now_sec();
+            runs[r] = t1 - t0;
+        }
+        t = median(runs, cfg->timed_runs);
+        gflops = flops / t / 1e9;
+        bw = sell_bytes_per_spmv(&S) / t / 1e9;
+        fprintf(fout, "%s,%s,%d,%d,%d,SELL_C32,%d,%.9f,%.6f,%.6f,%.6f,%.6f\n",
+            A->name, A->family, A->nrows, A->ncols, A->nnz, th, t, gflops, bw, flops / sell_bytes_per_spmv(&S), stream_bw);
+
+        for (int w = 0; w < cfg->warmup_runs; w++) fp32_csr_spmv(&F, x, y);
+        for (int r = 0; r < cfg->timed_runs; r++) {
+            double t0 = now_sec();
+            fp32_csr_spmv(&F, x, y);
+            double t1 = now_sec();
+            runs[r] = t1 - t0;
+        }
+        t = median(runs, cfg->timed_runs);
+        gflops = flops / t / 1e9;
+        bw = fp32csr_bytes_per_spmv(A) / t / 1e9;
+        fprintf(fout, "%s,%s,%d,%d,%d,FP32_CSR,%d,%.9f,%.6f,%.6f,%.6f,%.6f\n",
+            A->name, A->family, A->nrows, A->ncols, A->nnz, th, t, gflops, bw, flops / fp32csr_bytes_per_spmv(A), stream_bw);
     }
 
+    free_sell(&S);
+    free_fp32csr(&F);
     free_bcsr(&B4);
     free_bcsr(&B2);
     free_ell(&E);
