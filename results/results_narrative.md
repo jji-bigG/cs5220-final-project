@@ -11,8 +11,15 @@
 - fem_mesh: CSR=3.691 GFLOP/s, CSR_PREFETCH=3.687 GFLOP/s, ELLPACK=3.570 GFLOP/s, BCSR2x2=3.481 GFLOP/s, BCSR4x4=3.545 GFLOP/s, BCSR4x4_FMA=3.594 GFLOP/s (best: CSR)
 - irregular_graph: CSR=2.932 GFLOP/s, CSR_PREFETCH=2.908 GFLOP/s, ELLPACK=2.600 GFLOP/s, BCSR2x2=2.506 GFLOP/s, BCSR4x4=2.515 GFLOP/s, BCSR4x4_FMA=2.602 GFLOP/s (best: CSR)
 
+## Padding overhead (ELLPACK vs SELL_C32 vs CSR)
+
+| Matrix | ELLPACK overhead | SELL_C32 overhead | Reduction |
+|--------|-----------------|-------------------|----------|
+
 ## Limitations
 
 - Matrix set is synthetic but structured to mirror proposal families.
 - Bandwidth roofline uses STREAM-style fallback estimate.
 - AVX2 gather/scatter costs vary by CPU microarchitecture.
+- SELL_C32 uses scalar kernel; AVX2 unroll left as future work.
+- FP32_CSR accuracy bound: max |err| <= 1e-5 vs fp64 reference.
