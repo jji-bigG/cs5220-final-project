@@ -1,0 +1,21 @@
+
+Lmod is automatically replacing "gcc-native/14" with "gcc/12.2.0".
+
+
+Inactive Modules:
+  1) cray-libsci/25.09.0     2) cray-mpich/9.0.1
+
+Estimated STREAM peak bandwidth: 736.397 GB/s
+Running matrix 1/12: graph_small (irregular_graph), nnz=25363
+Running matrix 2/12: graph_medium (irregular_graph), nnz=44394
+Running matrix 3/12: graph_large (irregular_graph), nnz=66669
+Running matrix 4/12: fem_small (fem_mesh), nnz=26569
+Running matrix 5/12: fem_medium (fem_mesh), nnz=43264
+Running matrix 6/12: fem_large (fem_mesh), nnz=64009
+Running matrix 7/12: block_small (block_structured), nnz=24576
+Running matrix 8/12: block_medium (block_structured), nnz=36864
+Running matrix 9/12: block_large (block_structured), nnz=65536
+Running matrix 10/12: band_small (banded_pde), nnz=27988
+Running matrix 11/12: band_medium (banded_pde), nnz=65970
+Running matrix 12/12: band_large (banded_pde), nnz=119944
+Benchmark complete. Output: results/perlmutter_v2/benchmark_v2.csv

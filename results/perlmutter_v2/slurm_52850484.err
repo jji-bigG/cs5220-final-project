@@ -1,0 +1,13 @@
+
+Lmod is automatically replacing "gcc-native/14" with "gcc/12.2.0".
+
+
+Inactive Modules:
+  1) cray-libsci/25.09.0     2) cray-mpich/9.0.1
+
+Error invoking pkg-config!
+Package mpich was not found in the pkg-config search path.
+Perhaps you should add the directory containing `mpich.pc'
+to the PKG_CONFIG_PATH environment variable
+Package 'mpich', required by 'darshan-runtime', not found
+make: *** [Makefile:23: bin/spmv_bench] Error 1

@@ -2,23 +2,23 @@
 #SBATCH --job-name=spmv_bench_v2
 #SBATCH --account=m4341
 #SBATCH --constraint=cpu
-#SBATCH --qos=regular
+#SBATCH --qos=debug
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=128
-#SBATCH --time=01:30:00
+#SBATCH --time=00:30:00
 #SBATCH --output=results/perlmutter_v2/slurm_%j.out
 #SBATCH --error=results/perlmutter_v2/slurm_%j.err
 
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "${ROOT_DIR}"
 
 mkdir -p results/perlmutter_v2
 
 # ── build ──────────────────────────────────────────────────────────────────
 module load gcc/12 || true
-make all
+make CC=gcc all
 
 echo "Binary built: $(./bin/spmv_bench --help 2>&1 | head -1 || echo ok)"
 

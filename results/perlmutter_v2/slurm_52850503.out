@@ -1,0 +1,9 @@
+mkdir -p bin
+gcc -O3 -march=native -Wall -Wextra -std=c11 -fopenmp -o bin/spmv_bench src/spmv_bench.c -lm -fopenmp
+Binary built: Estimated STREAM peak bandwidth: 734.568 GB/s
+ok
+Hardware threads available: 256
+Starting benchmark sweep: 1..256 threads, 5 warmup, 20 timed
+Benchmark done: results/perlmutter_v2/benchmark_v2.csv
+Wrote results/perlmutter_v2/roofline.png, results/perlmutter_v2/strong_scaling.png, results/perlmutter_v2/padding_overhead.png, results/perlmutter_v2/narrative.md
+All done. Results in results/perlmutter_v2/

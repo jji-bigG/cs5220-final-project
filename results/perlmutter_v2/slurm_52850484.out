@@ -1,0 +1,2 @@
+mkdir -p bin
+cc -O3 -march=native -Wall -Wextra -std=c11 -fopenmp -o bin/spmv_bench src/spmv_bench.c -lm -fopenmp
